@@ -1,23 +1,77 @@
+#include <psp2/kernel/clib.h>
 #include <psp2/kernel/modulemgr.h>
 #include <psp2/kernel/processmgr.h>
-#include <psp2/kernel/clib.h>
-#include <psp2/net/netctl.h>
-#include <psp2/power.h>
 #include <taihen.h>
 
-static SceUID g_hook, g_hook2;
+static SceUID g_hook = -1;
+static SceUID g_hook2 = -1;
 static tai_hook_ref_t ref_hook0, ref_hook1;
 
 int ret0() {
 	return 0;
 }
 
-int fake_dev_mode(uint8_t *ret) {
+int fake_dev_mode(unsigned char *ret) {
 	*ret = 0;
 	return 0;
 }
 
-void _start() __attribute__ ((weak, alias ("module_start")));
+static const unsigned char H1_PAT[] = {
+	0x2d, 0xe9, 0xf0, 0x41, 0xfe, 0xb0, 0x47, 0xf6, 0x14, 0x28, 0xc8, 0xf2,
+	0x46, 0x18, 0xd8, 0xf8, 0x00, 0x20, 0x7d, 0x92, 0x4a, 0xf6, 0x74, 0x42,
+	0xc8, 0xf2, 0x53, 0x12, 0x05, 0x1c, 0x12, 0xf1, 0x08, 0x00, 0x06, 0x90,
+	0x54, 0xac, 0x20, 0x1c, 0xa0, 0x22, 0x8a, 0xf1, 0xc0, 0xee, 0xa0, 0x20,
+	0x7c, 0x90, 0x01, 0xa9, 0x00, 0xaa, 0x20, 0x1c, 0x00, 0xf0, 0x74, 0xf8,
+	0x00, 0x99, 0x00, 0x28, 0x00, 0xda, 0x11, 0xe0, 0x4e, 0xf2, 0x3b, 0x10,
+	0x01, 0x9e, 0xcb, 0xf6, 0xdd, 0x10, 0x00, 0x23, 0x00, 0x27, 0x02, 0x1c,
+	0x9f, 0x42, 0x08, 0xbf, 0x96, 0x42,
+};
+static const unsigned char H1_MASK[] = {
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00,
+	0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+};
+#define H1_LEN ((unsigned int)sizeof(H1_PAT))
+
+static const unsigned char H2_PAT[] = {
+	0x10, 0xb5, 0x04, 0x1c, 0x80, 0xf1, 0x84, 0xea, 0x00, 0x21, 0x00,
+	0x28, 0x08, 0x46, 0x00, 0xd1, 0x01, 0x21, 0x21, 0x70, 0x10, 0xbd,
+};
+static const unsigned char H2_MASK[] = {
+	0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+};
+#define H2_LEN ((unsigned int)sizeof(H2_PAT))
+
+static int find_unique(const unsigned char *hay, unsigned int hay_len, const unsigned char *pat, const unsigned char *mask, unsigned int pat_len, unsigned int *out_off) {
+	unsigned int i, k, found = 0, off = 0;
+
+	if (hay_len < pat_len)
+		return 0;
+	for (i = 0; i + pat_len <= hay_len; i++) {
+		for (k = 0; k < pat_len; k++) {
+			if (mask[k] && hay[i + k] != pat[k])
+				break;
+		}
+		if (k == pat_len) {
+			if (++found > 1)
+				return 0; // ambiguous
+			off = i;
+		}
+	}
+	if (found == 1) {
+		*out_off = off;
+		return 1;
+	}
+	return 0;
+}
+
+void _start() __attribute__((weak, alias("module_start")));
 int module_start(SceSize argc, const void *args) {
 	tai_module_info_t info;
 	info.size = sizeof(info);
@@ -27,57 +81,37 @@ int module_start(SceSize argc, const void *args) {
 		return SCE_KERNEL_START_FAILED;
 	}
 
-	uint32_t offset;
-	uint32_t offset2;
-	
-	switch (info.module_nid) {
-	case 0xEAB89D5C: // PTEL 3.60 SceShell
-		offset = 0x2c2af8;
-		offset2 = 0x2ce4d4;
-		break;
-	case 0x6CB01295: // PDEL 3.60 SceShell
-		offset = 0x2be204;
-		offset2 = 0;
-		break;
-	case 0x0552F692: // Retail 3.60 SceShell
-		offset = 0x2cc088;
-		offset2 = 0x2d7a64;
-		break;
-	case 0x5549BF1F: // Retail 3.65 SceShell
-	case 0x34B4D82E: // Retail 3.67 SceShell
-	case 0x12DAC0F3: // Retail 3.68 SceShell
-		offset = 0x2cc4cc;
-		offset2 = 0x2d7ea8;
-		break;
-	default:
-		sceClibPrintf("Unsupported firmware\n");
+	SceKernelModuleInfo minfo;
+	minfo.size = sizeof(minfo);
+	if (sceKernelGetModuleInfo(info.modid, &minfo) < 0) {
+		sceClibPrintf("[NoTrpDrm] sceKernelGetModuleInfo failed\n");
 		return SCE_KERNEL_START_FAILED;
 	}
-	
-	g_hook = taiHookFunctionOffset(&ref_hook0,
-		info.modid,
-		0, // segidx
-		offset, // offset
-		1, // thumb
-		ret0);
-	
-	if (offset2) {
-		g_hook2 = taiHookFunctionOffset(&ref_hook1,
-			info.modid,
-			0, // segidx
-			offset2, // offset
-			1, // thumb
-			fake_dev_mode);
-	}	
-	
+	const unsigned char *text = (const unsigned char *)minfo.segments[0].vaddr;
+	unsigned int text_sz = (unsigned int)minfo.segments[0].memsz;
+
+	unsigned int off1 = 0, off2 = 0;
+	if (!find_unique(text, text_sz, H1_PAT, H1_MASK, H1_LEN, &off1)) {
+		sceClibPrintf("[NoTrpDrm] signature #1 not found on SceShell nid 0x%08X - unsupported shell\n", info.module_nid);
+		return SCE_KERNEL_START_FAILED;
+	}
+	g_hook = taiHookFunctionOffset(&ref_hook0, info.modid, 0, off1, 1, ret0);
+
+	if (find_unique(text, text_sz, H2_PAT, H2_MASK, H2_LEN, &off2)) { // some shells (PDEL) do not need it.
+		g_hook2 = taiHookFunctionOffset(&ref_hook1, info.modid, 0, off2, 1, fake_dev_mode);
+	}
+
 	return SCE_KERNEL_START_SUCCESS;
 }
 
 int module_stop(SceSize argc, const void *args) {
 	sceClibPrintf("Stopping module\n");
 
-	if (g_hook >= 0) taiHookRelease(g_hook, ref_hook0);
-	if (g_hook2 >= 0) taiHookRelease(g_hook2, ref_hook1);
+	if (g_hook >= 0)
+		taiHookRelease(g_hook, ref_hook0);
+
+	if (g_hook2 >= 0)
+		taiHookRelease(g_hook2, ref_hook1);
 
 	return SCE_KERNEL_STOP_SUCCESS;
 }
